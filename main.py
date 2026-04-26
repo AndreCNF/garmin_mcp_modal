@@ -37,6 +37,7 @@ with image.imports():
     )
     from garminconnect import Garmin  # ty:ignore[unresolved-import]
     from mcp.server.fastmcp import FastMCP  # ty:ignore[unresolved-import]
+    from mcp.server.fastmcp.server import TransportSecuritySettings  # ty:ignore[unresolved-import]
 
 app = modal.App(name="garmin_mcp", image=image, secrets=[modal.Secret.from_name("garmin-tokens")])
 
@@ -65,7 +66,11 @@ def endpoint():
     workouts.configure(garmin_client)
     data_management.configure(garmin_client)
 
-    fast_mcp_app = FastMCP("Garmin Connect v1.0", stateless_http=True)
+    fast_mcp_app = FastMCP(
+        "Garmin Connect v1.0",
+        stateless_http=True,
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    )
 
     fast_mcp_app = activity_management.register_tools(fast_mcp_app)
     fast_mcp_app = health_wellness.register_tools(fast_mcp_app)
