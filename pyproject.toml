@@ -1,0 +1,15 @@
+[project]
+name = "garmin-mcp-modal"
+version = "0.1.0"
+description = "Garmin MCP server hosted on Modal."
+readme = "README.md"
+requires-python = ">=3.13,<4"
+dependencies = [
+    "curl-cffi>=0.15.0",
+    "garmin-mcp",
+    "garminconnect>=0.2.38",
+    "modal>=1.4.2,<2",
+]
+
+[tool.uv.sources]
+garmin-mcp = { git = "https://github.com/Taxuspt/garmin_mcp.git" }
