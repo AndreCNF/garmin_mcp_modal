@@ -219,3 +219,5 @@ __marimo__/
 
 # Credentials
 .garmin*
+
+.DS_Store
