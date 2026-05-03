@@ -22,7 +22,7 @@ with image.imports():
     from fastapi import FastAPI  # ty:ignore[unresolved-import]
     from fastmcp import Client  # ty:ignore[unresolved-import]
     from fastmcp.client.transports import StreamableHttpTransport  # ty:ignore[unresolved-import]
-    from garmin_mcp import (  # ty:ignore[unresolved-import]
+    from garmin_mcp import (
         activity_management,
         challenges,
         data_management,
@@ -35,15 +35,15 @@ with image.imports():
         workout_templates,
         workouts,
     )
-    from garminconnect import Garmin  # ty:ignore[unresolved-import]
-    from mcp.server.fastmcp import FastMCP  # ty:ignore[unresolved-import]
-    from mcp.server.fastmcp.server import TransportSecuritySettings  # ty:ignore[unresolved-import]
+    from garminconnect import Garmin
+    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp.server import TransportSecuritySettings
 
 app = modal.App(name="garmin_mcp", image=image, secrets=[modal.Secret.from_name("garmin-tokens")])
 
 
 @app.function()
-@modal.asgi_app()
+@modal.asgi_app(requires_proxy_auth=True)
 def endpoint():
     """ASGI web endpoint for the MCP server."""
     tokens_base64 = os.environ.get("GARMINTOKENS_BASE64")
@@ -104,7 +104,15 @@ async def test_tool(tool_name: str | None = None):
     if tool_name is None:
         tool_name = "get_full_name"
 
-    transport = StreamableHttpTransport(url=f"{endpoint.get_web_url()}/mcp/")
+    token_id = os.environ.get("MODAL_TOKEN_ID")
+    token_secret = os.environ.get("MODAL_TOKEN_SECRET")
+    if not token_id or not token_secret:
+        raise RuntimeError("MODAL_TOKEN_ID and MODAL_TOKEN_SECRET must be set to test the authenticated endpoint.")
+
+    transport = StreamableHttpTransport(
+        url=f"{endpoint.get_web_url()}/mcp/",
+        headers={"Modal-Key": token_id, "Modal-Secret": token_secret},
+    )
     client = Client(transport)
 
     async with client:

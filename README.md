@@ -54,7 +54,9 @@ uv run modal serve main.py
 
 ### 5. Connect your MCP client
 
-Add the deployed endpoint URL to your MCP client (e.g. Claude Desktop). The URL is printed after deploy and follows the pattern:
+The endpoint is protected by [Modal Proxy Auth](https://modal.com/docs/guide/proxy-auth). Create a Proxy Auth Token at [modal.com/settings/proxy-auth-tokens](https://modal.com/settings/proxy-auth-tokens), then add the deployed endpoint to your MCP client with the `Modal-Key` and `Modal-Secret` headers.
+
+The endpoint URL is printed after deploy and follows the pattern:
 
 ```
 https://<your-modal-username>--garmin-mcp-endpoint.modal.run/mcp/
@@ -64,7 +66,9 @@ Select **Streamable HTTP** as the transport type.
 
 ### Testing
 
+Set your Modal API credentials and run:
+
 ```bash
-uv run modal run main.py::test_tool
+MODAL_TOKEN_ID=<token-id> MODAL_TOKEN_SECRET=<token-secret> uv run modal run main.py::test_tool
 ```
 
