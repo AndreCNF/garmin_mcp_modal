@@ -17,11 +17,17 @@ image = (
 )
 
 with image.imports():
+    import base64
+    import hashlib
+    import hmac
+    import json
     import os
+    import secrets
     import time
+    from urllib.parse import urlencode
 
     from fastapi import FastAPI, Request  # ty:ignore[unresolved-import]
-    from fastapi.responses import JSONResponse  # ty:ignore[unresolved-import]
+    from fastapi.responses import JSONResponse, RedirectResponse  # ty:ignore[unresolved-import]
     from fastmcp import Client  # ty:ignore[unresolved-import]
     from fastmcp.client.transports import StreamableHttpTransport  # ty:ignore[unresolved-import]
     from garmin_mcp import (
@@ -115,46 +121,149 @@ def endpoint():
     mcp_app = fast_mcp_app.streamable_http_app()
 
     fastapi_app = FastAPI(lifespan=mcp_app.router.lifespan_context)
-    fastapi_app.mount("/", mcp_app, "mcp")
 
-    # ── Minimal OAuth 2.0 Client Credentials flow ─────────────────────────
-    # Claude.ai's "Add custom connector" UI sends client_id + client_secret
-    # to /oauth/token and expects a bearer access_token back.
-    # We treat client_secret == MCP_BEARER_TOKEN as the credential.
+    # ── OAuth 2.0 Authorization Code + PKCE ───────────────────────────────
+    # Claude.ai's custom-connector UI only drives Authorization Code with PKCE,
+    # so we wrap the static MCP_BEARER_TOKEN in that flow:
+    #   /authorize  — auto-approves (the user's proof of authorization is the
+    #                 client_secret they pasted into the UI; nothing to ask
+    #                 them in a browser) and 302s back with a signed code.
+    #   /token      — verifies client_secret + PKCE + code signature, then
+    #                 returns MCP_BEARER_TOKEN as the access token.
+    #
+    # Codes are HMAC-signed (key = MCP_BEARER_TOKEN) and self-contained, so the
+    # flow stays stateless across Modal containers — no shared store needed.
+    # Routes MUST be declared before the catch-all mount below, otherwise
+    # Starlette's Mount("/") matches first and the OAuth endpoints become
+    # unreachable.
 
     base_url = endpoint.get_web_url()
+    CLAUDE_CALLBACKS = {
+        "https://claude.ai/api/mcp/auth_callback",
+        "https://claude.com/api/mcp/auth_callback",
+    }
+    CODE_TTL_SECONDS = 300
+
+    def _b64url(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+    def _b64url_decode(s: str) -> bytes:
+        return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+    def _sign_code(payload: dict) -> str:
+        body = _b64url(json.dumps(payload, separators=(",", ":")).encode())
+        sig = hmac.new(mcp_bearer_token.encode(), body.encode(), hashlib.sha256).hexdigest()
+        return f"{body}.{sig}"
+
+    def _verify_code(code: str) -> dict | None:
+        try:
+            body, sig = code.rsplit(".", 1)
+        except ValueError:
+            return None
+        expected = hmac.new(mcp_bearer_token.encode(), body.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        try:
+            payload = json.loads(_b64url_decode(body))
+        except (ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict) or payload.get("exp", 0) < int(time.time()):
+            return None
+        return payload
 
     @fastapi_app.get("/.well-known/oauth-authorization-server")
     async def oauth_metadata():
         return JSONResponse(
             {
                 "issuer": base_url,
-                "token_endpoint": f"{base_url}/oauth/token",
-                "grant_types_supported": ["client_credentials"],
+                "authorization_endpoint": f"{base_url}/authorize",
+                "token_endpoint": f"{base_url}/token",
+                "response_types_supported": ["code"],
+                "grant_types_supported": ["authorization_code"],
+                "code_challenge_methods_supported": ["S256"],
                 "token_endpoint_auth_methods_supported": ["client_secret_post"],
             }
         )
 
-    @fastapi_app.post("/oauth/token")
-    async def oauth_token(request: Request):
-        form = await request.form()
-        grant_type = form.get("grant_type")
-        client_secret = form.get("client_secret")
+    @fastapi_app.get("/.well-known/oauth-protected-resource/mcp")
+    async def resource_metadata():
+        return JSONResponse(
+            {
+                "resource": f"{base_url}/mcp/",
+                "authorization_servers": [base_url],
+                "bearer_methods_supported": ["header"],
+            }
+        )
 
-        if grant_type != "client_credentials":
+    @fastapi_app.get("/authorize")
+    async def authorize(
+        response_type: str,
+        client_id: str,
+        redirect_uri: str,
+        code_challenge: str,
+        code_challenge_method: str,
+        state: str | None = None,
+    ):
+        if response_type != "code":
+            return JSONResponse({"error": "unsupported_response_type"}, status_code=400)
+        if redirect_uri not in CLAUDE_CALLBACKS:
+            return JSONResponse(
+                {"error": "invalid_request", "error_description": "redirect_uri not allowed"},
+                status_code=400,
+            )
+        if code_challenge_method != "S256":
+            return JSONResponse(
+                {"error": "invalid_request", "error_description": "S256 PKCE required"},
+                status_code=400,
+            )
+
+        code = _sign_code(
+            {
+                "cid": client_id,
+                "ru": redirect_uri,
+                "cc": code_challenge,
+                "exp": int(time.time()) + CODE_TTL_SECONDS,
+                "n": secrets.token_hex(8),
+            }
+        )
+        params = {"code": code}
+        if state:
+            params["state"] = state
+        return RedirectResponse(f"{redirect_uri}?{urlencode(params)}", status_code=302)
+
+    @fastapi_app.post("/token")
+    async def token(request: Request):
+        form = await request.form()
+        if form.get("grant_type") != "authorization_code":
             return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
 
-        if client_secret != mcp_bearer_token:
+        client_secret = form.get("client_secret") or ""
+        if not hmac.compare_digest(client_secret, mcp_bearer_token):
             return JSONResponse({"error": "invalid_client"}, status_code=401)
+
+        payload = _verify_code(form.get("code") or "")
+        if payload is None:
+            return JSONResponse({"error": "invalid_grant"}, status_code=400)
+
+        if payload.get("cid") != form.get("client_id") or payload.get("ru") != form.get("redirect_uri"):
+            return JSONResponse({"error": "invalid_grant"}, status_code=400)
+
+        code_verifier = form.get("code_verifier") or ""
+        challenge = _b64url(hashlib.sha256(code_verifier.encode()).digest())
+        if not hmac.compare_digest(challenge, payload.get("cc", "")):
+            return JSONResponse({"error": "invalid_grant"}, status_code=400)
 
         return JSONResponse(
             {
                 "access_token": mcp_bearer_token,
                 "token_type": "bearer",
                 "expires_in": 3600,
-                "issued_at": int(time.time()),
             }
         )
+
+    # Catch-all MCP mount — must be registered LAST so it doesn't shadow the
+    # OAuth routes above.
+    fastapi_app.mount("/", mcp_app, "mcp")
 
     return fastapi_app
 

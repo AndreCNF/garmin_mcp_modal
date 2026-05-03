@@ -100,16 +100,16 @@ Add the server to `~/Library/Application Support/Claude/claude_desktop_config.js
 
 #### Other clients (Claude.ai web, mobile, etc.)
 
-Claude.ai's "Add custom connector" UI uses OAuth. The server implements a minimal **OAuth 2.0 Client Credentials** flow, so you can authenticate directly from the UI:
+Claude.ai's "Add custom connector" UI drives the standard **OAuth 2.0 Authorization Code flow with PKCE**. The server implements a minimal headless variant of that flow — there is no consent screen because the proof of authorization is the secret you paste into the UI.
 
 1. In Claude.ai, go to **Settings → Integrations → Add custom integration**
 2. Fill in the fields:
    - **Name**: `Garmin Connect` (or anything you like)
    - **Remote MCP server URL**: `https://<your-modal-username>--garmin-mcp-endpoint.modal.run/mcp/`
-   - **OAuth Client ID**: `claude` (any string — it is not checked)
+   - **OAuth Client ID**: `claude` (any non-empty string — it's only used to bind the auth code to the token exchange)
    - **OAuth Client Secret**: your `MCP_BEARER_TOKEN` value
 
-Claude.ai will POST to `/oauth/token` with your `client_secret`, receive the token back, and attach it automatically to every MCP request.
+Behind the scenes Claude hits `/.well-known/oauth-authorization-server` for discovery, redirects through `/authorize` (which auto-approves and 302s back with an HMAC-signed code), then POSTs to `/token` with the code, the PKCE verifier, and your `client_secret`. The server validates everything and returns `MCP_BEARER_TOKEN` as the access token, which Claude attaches to every subsequent MCP request.
 
 ### Testing
 
