@@ -35,12 +35,30 @@ You will be prompted for your Garmin email, password, and MFA code (if enabled).
 ### 3. Upload tokens as a Modal Secret
 
 ```bash
-modal secret create garmin-tokens GARMINTOKENS_BASE64="$(cat ~/.garminconnect_base64)"
+uv run modal secret create garmin-tokens GARMINTOKENS_BASE64="$(cat ~/.garminconnect_base64)"
 ```
 
 Tokens are valid for ~6 months. When they expire, re-run steps 2–3.
 
-### 4. Deploy
+### 5. Create an MCP bearer token
+
+Generate a random token, save it to an environment variable (so that you can read it and pass it to Claude later), and then upload it as a Modal Secret:
+
+```bash
+# generate and export token in your current shell
+export MCP_BEARER_TOKEN="$(openssl rand -hex 32)"
+
+# optionally verify it's set
+echo "MCP_BEARER_TOKEN=${MCP_BEARER_TOKEN}"
+
+# upload to Modal as a secret
+uv run modal secret create mcp-auth MCP_BEARER_TOKEN="$MCP_BEARER_TOKEN"
+# if the secret already exists, update it instead:
+# uv run modal secret delete mcp-auth
+# uv run modal secret create mcp-auth MCP_BEARER_TOKEN="$MCP_BEARER_TOKEN"
+```
+
+### 6. Deploy
 
 ```bash
 uv run modal deploy main.py
@@ -52,9 +70,9 @@ For local development with hot-reloading:
 uv run modal serve main.py
 ```
 
-### 5. Connect your MCP client
+### 7. Connect your MCP client
 
-The endpoint is protected by [Modal Proxy Auth](https://modal.com/docs/guide/proxy-auth). Create a Proxy Auth Token at [modal.com/settings/proxy-auth-tokens](https://modal.com/settings/proxy-auth-tokens), then add the deployed endpoint to your MCP client with the `Modal-Key` and `Modal-Secret` headers.
+The endpoint uses standard HTTP Bearer auth (`Authorization: Bearer <token>`), which works on any device or MCP client without local config files.
 
 The endpoint URL is printed after deploy and follows the pattern:
 
@@ -62,13 +80,40 @@ The endpoint URL is printed after deploy and follows the pattern:
 https://<your-modal-username>--garmin-mcp-endpoint.modal.run/mcp/
 ```
 
-Select **Streamable HTTP** as the transport type.
+#### Claude Desktop
+
+Add the server to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "garmin": {
+      "type": "streamable-http",
+      "url": "https://<your-modal-username>--garmin-mcp-endpoint.modal.run/mcp/",
+      "headers": {
+        "Authorization": "Bearer <your-MCP_BEARER_TOKEN>"
+      }
+    }
+  }
+}
+```
+
+#### Other clients (Claude.ai web, mobile, etc.)
+
+Claude.ai's "Add custom connector" UI uses OAuth. The server implements a minimal **OAuth 2.0 Client Credentials** flow, so you can authenticate directly from the UI:
+
+1. In Claude.ai, go to **Settings → Integrations → Add custom integration**
+2. Fill in the fields:
+   - **Name**: `Garmin Connect` (or anything you like)
+   - **Remote MCP server URL**: `https://<your-modal-username>--garmin-mcp-endpoint.modal.run/mcp/`
+   - **OAuth Client ID**: `claude` (any string — it is not checked)
+   - **OAuth Client Secret**: your `MCP_BEARER_TOKEN` value
+
+Claude.ai will POST to `/oauth/token` with your `client_secret`, receive the token back, and attach it automatically to every MCP request.
 
 ### Testing
 
-Set your Modal API credentials and run:
-
 ```bash
-MODAL_TOKEN_ID=<token-id> MODAL_TOKEN_SECRET=<token-secret> uv run modal run main.py::test_tool
+MCP_BEARER_TOKEN=<your-token> uv run modal run main.py::test_tool
 ```
 

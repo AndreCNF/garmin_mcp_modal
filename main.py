@@ -18,8 +18,10 @@ image = (
 
 with image.imports():
     import os
+    import time
 
-    from fastapi import FastAPI  # ty:ignore[unresolved-import]
+    from fastapi import FastAPI, Request  # ty:ignore[unresolved-import]
+    from fastapi.responses import JSONResponse  # ty:ignore[unresolved-import]
     from fastmcp import Client  # ty:ignore[unresolved-import]
     from fastmcp.client.transports import StreamableHttpTransport  # ty:ignore[unresolved-import]
     from garmin_mcp import (
@@ -36,14 +38,19 @@ with image.imports():
         workouts,
     )
     from garminconnect import Garmin
+    from mcp.server.auth.middleware.bearer_auth import AccessToken
     from mcp.server.fastmcp import FastMCP
     from mcp.server.fastmcp.server import TransportSecuritySettings
 
-app = modal.App(name="garmin_mcp", image=image, secrets=[modal.Secret.from_name("garmin-tokens")])
+app = modal.App(
+    name="garmin_mcp",
+    image=image,
+    secrets=[modal.Secret.from_name("garmin-tokens"), modal.Secret.from_name("mcp-auth")],
+)
 
 
 @app.function()
-@modal.asgi_app(requires_proxy_auth=True)
+@modal.asgi_app()
 def endpoint():
     """ASGI web endpoint for the MCP server."""
     tokens_base64 = os.environ.get("GARMINTOKENS_BASE64")
@@ -51,6 +58,20 @@ def endpoint():
         raise RuntimeError(
             "GARMINTOKENS_BASE64 secret is not set. Run: modal secret create garmin-tokens GARMINTOKENS_BASE64=$(cat ~/.garminconnect_base64)"
         )
+
+    mcp_bearer_token = os.environ.get("MCP_BEARER_TOKEN")
+    if not mcp_bearer_token:
+        raise RuntimeError(
+            "MCP_BEARER_TOKEN secret is not set. Run: modal secret create mcp-auth MCP_BEARER_TOKEN=<your-secret>"
+        )
+
+    class StaticBearerVerifier:
+        """Accepts a single static bearer token — simple cross-device auth."""
+
+        async def verify_token(self, token: str) -> AccessToken | None:
+            if token == mcp_bearer_token:
+                return AccessToken(token=token, client_id="static", scopes=[])
+            return None
 
     garmin_client = Garmin()
     garmin_client.garth.loads(tokens_base64)
@@ -69,6 +90,7 @@ def endpoint():
     fast_mcp_app = FastMCP(
         "Garmin Connect v1.0",
         stateless_http=True,
+        token_verifier=StaticBearerVerifier(),
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
 
@@ -95,6 +117,45 @@ def endpoint():
     fastapi_app = FastAPI(lifespan=mcp_app.router.lifespan_context)
     fastapi_app.mount("/", mcp_app, "mcp")
 
+    # ── Minimal OAuth 2.0 Client Credentials flow ─────────────────────────
+    # Claude.ai's "Add custom connector" UI sends client_id + client_secret
+    # to /oauth/token and expects a bearer access_token back.
+    # We treat client_secret == MCP_BEARER_TOKEN as the credential.
+
+    base_url = endpoint.get_web_url()
+
+    @fastapi_app.get("/.well-known/oauth-authorization-server")
+    async def oauth_metadata():
+        return JSONResponse(
+            {
+                "issuer": base_url,
+                "token_endpoint": f"{base_url}/oauth/token",
+                "grant_types_supported": ["client_credentials"],
+                "token_endpoint_auth_methods_supported": ["client_secret_post"],
+            }
+        )
+
+    @fastapi_app.post("/oauth/token")
+    async def oauth_token(request: Request):
+        form = await request.form()
+        grant_type = form.get("grant_type")
+        client_secret = form.get("client_secret")
+
+        if grant_type != "client_credentials":
+            return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
+
+        if client_secret != mcp_bearer_token:
+            return JSONResponse({"error": "invalid_client"}, status_code=401)
+
+        return JSONResponse(
+            {
+                "access_token": mcp_bearer_token,
+                "token_type": "bearer",
+                "expires_in": 3600,
+                "issued_at": int(time.time()),
+            }
+        )
+
     return fastapi_app
 
 
@@ -104,14 +165,13 @@ async def test_tool(tool_name: str | None = None):
     if tool_name is None:
         tool_name = "get_full_name"
 
-    token_id = os.environ.get("MODAL_TOKEN_ID")
-    token_secret = os.environ.get("MODAL_TOKEN_SECRET")
-    if not token_id or not token_secret:
-        raise RuntimeError("MODAL_TOKEN_ID and MODAL_TOKEN_SECRET must be set to test the authenticated endpoint.")
+    bearer_token = os.environ.get("MCP_BEARER_TOKEN")
+    if not bearer_token:
+        raise RuntimeError("MCP_BEARER_TOKEN must be set to test the authenticated endpoint.")
 
     transport = StreamableHttpTransport(
         url=f"{endpoint.get_web_url()}/mcp/",
-        headers={"Modal-Key": token_id, "Modal-Secret": token_secret},
+        headers={"Authorization": f"Bearer {bearer_token}"},
     )
     client = Client(transport)
 
