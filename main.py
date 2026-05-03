@@ -88,10 +88,17 @@ def endpoint():
     # `configure()` calls inside login (which would otherwise replace it with a
     # vanilla HTTPAdapter, breaking OAuth2 refresh with 429s).
     install_curl_impersonation(garmin_client.garth)
-    # Use Garmin.login(tokenstore=...) instead of bare garth.loads() — it also
-    # populates `display_name` (required by tools like get_user_summary which
-    # would otherwise build URLs with `daily/None`).
     garmin_client.login(tokenstore=tokens_base64)
+    # login()'s branchy profile-loading can leave `display_name` None (the path
+    # that reads from /socialProfile silently returns None if the field is
+    # missing). Tools build URLs like `daily/{display_name}`, so a None here
+    # turns every request into `daily/None` → 403. /userprofile/profile always
+    # carries displayName — re-fetch from there as a guard.
+    if not garmin_client.display_name:
+        prof = garmin_client.garth.connectapi("/userprofile-service/userprofile/profile")
+        if prof and isinstance(prof, dict):
+            garmin_client.display_name = prof.get("displayName")
+            garmin_client.full_name = prof.get("fullName") or garmin_client.full_name
 
     activity_management.configure(garmin_client)
     health_wellness.configure(garmin_client)
