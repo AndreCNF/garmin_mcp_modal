@@ -45,6 +45,7 @@ with image.imports():
     )
     from garminconnect import Garmin
     from mcp.server.auth.middleware.bearer_auth import AccessToken
+    from mcp.server.auth.settings import AuthSettings
     from mcp.server.fastmcp import FastMCP
     from mcp.server.fastmcp.server import TransportSecuritySettings
 
@@ -93,10 +94,16 @@ def endpoint():
     workouts.configure(garmin_client)
     data_management.configure(garmin_client)
 
+    base_url = endpoint.get_web_url()
+
     fast_mcp_app = FastMCP(
         "Garmin Connect v1.0",
         stateless_http=True,
         token_verifier=StaticBearerVerifier(),
+        # AuthSettings is required whenever token_verifier is set; it tells
+        # FastMCP which OAuth issuer it should advertise to clients and which
+        # URL to use as the protected-resource identifier.
+        auth=AuthSettings(issuer_url=base_url, resource_server_url=f"{base_url}/mcp/"),
         transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     )
 
@@ -137,7 +144,6 @@ def endpoint():
     # Starlette's Mount("/") matches first and the OAuth endpoints become
     # unreachable.
 
-    base_url = endpoint.get_web_url()
     CLAUDE_CALLBACKS = {
         "https://claude.ai/api/mcp/auth_callback",
         "https://claude.com/api/mcp/auth_callback",
