@@ -14,6 +14,7 @@ image = (
         "fastmcp>=2.14.0,<3",
         "mcp>=1.27.0,<2",
     )
+    .add_local_python_source("garmin_session")
 )
 
 with image.imports():
@@ -49,6 +50,8 @@ with image.imports():
     from mcp.server.fastmcp import FastMCP
     from mcp.server.fastmcp.server import TransportSecuritySettings
 
+    from garmin_session import install_curl_impersonation
+
 app = modal.App(
     name="garmin_mcp",
     image=image,
@@ -81,7 +84,14 @@ def endpoint():
             return None
 
     garmin_client = Garmin()
-    garmin_client.garth.loads(tokens_base64)
+    # Pin a curl_cffi adapter on garth's session before login so it survives
+    # `configure()` calls inside login (which would otherwise replace it with a
+    # vanilla HTTPAdapter, breaking OAuth2 refresh with 429s).
+    install_curl_impersonation(garmin_client.garth)
+    # Use Garmin.login(tokenstore=...) instead of bare garth.loads() — it also
+    # populates `display_name` (required by tools like get_user_summary which
+    # would otherwise build URLs with `daily/None`).
+    garmin_client.login(tokenstore=tokens_base64)
 
     activity_management.configure(garmin_client)
     health_wellness.configure(garmin_client)

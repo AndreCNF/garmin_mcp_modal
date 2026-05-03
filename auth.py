@@ -13,43 +13,11 @@ Usage:
 import getpass
 import os
 
-import curl_cffi.requests
 import dotenv
-from requests import Session as RequestsSession
-from requests.models import Response
+
+from garmin_session import install_curl_impersonation
 
 dotenv.load_dotenv()
-
-
-class ImpersonatedSession(RequestsSession):
-    """A requests.Session that routes all HTTP calls through curl_cffi with
-    browser TLS impersonation to bypass Garmin's anti-bot 429 protection.
-    Inheriting from requests.Session keeps garth's internal OAuth1 wiring intact
-    (it needs .adapters, .mount, etc.), while curl_cffi handles the actual I/O.
-    """
-
-    def __init__(self, impersonate: str = "chrome120"):
-        super().__init__()
-        self._curl = curl_cffi.requests.Session(impersonate=impersonate)
-
-    def send(self, request, **kwargs):  # type: ignore[override]
-        kwargs.pop("proxies", None)  # curl_cffi handles proxies differently
-        resp = self._curl.request(
-            method=request.method,
-            url=request.url,
-            headers=dict(request.headers),
-            data=request.body,
-            **{k: v for k, v in kwargs.items() if k in ("timeout", "verify", "stream")},
-        )
-        # Wrap the curl_cffi response into a requests.Response so garth is happy
-        r = Response()
-        r.status_code = resp.status_code
-        r.headers.update(resp.headers)
-        r._content = resp.content
-        r.encoding = resp.encoding
-        r.url = resp.url
-        r.request = request
-        return r
 
 
 def get_credentials() -> tuple[str, str]:
@@ -69,13 +37,7 @@ def get_mfa() -> str:
     return input("Enter MFA code: ")
 
 
-def make_curl_session() -> ImpersonatedSession:
-    """Create a requests-compatible session that impersonates Chrome to avoid 429s."""
-    return ImpersonatedSession(impersonate="chrome120")
-
-
 def main():
-    import garth
     from garminconnect import Garmin
 
     token_path = os.getenv("GARMINTOKENS", "~/.garminconnect")
@@ -88,19 +50,13 @@ def main():
     email, password = get_credentials()
     print(f"\nAuthenticating as: {email}")
 
-    # Pass the curl_cffi session directly into garth.Client to bypass anti-bot detection.
-    # garminconnect.Garmin uses garth internally; we override its garth client after init.
-    curl_session = make_curl_session()
-    garth_client = garth.Client(session=curl_session)
-
     garmin = Garmin(
         email=email,
         password=password,
         is_cn=is_cn,
         prompt_mfa=get_mfa,
     )
-    # Replace the default garth client with our curl_cffi-backed one
-    garmin.garth = garth_client
+    install_curl_impersonation(garmin.garth)
     garmin.login()
 
     # Save tokens
