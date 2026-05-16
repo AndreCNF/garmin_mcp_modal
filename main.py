@@ -85,16 +85,36 @@ app = modal.App(
     secrets=[modal.Secret.from_name("garmin-tokens"), modal.Secret.from_name("mcp-auth")],
 )
 
-# Volume holds the OAuth1 token (long-lived, ~1 year) from the last successful
-# bootstrap. `endpoint()` prefers `/tokens/garmin.b64` over the bootstrap env
-# var so token rotation doesn't require a redeploy. OAuth2 (24h TTL) is
-# refreshed lazily by garth on the first API call inside each cold-start
-# container — there's no longer a cron because Garmin's anti-bot rate-limits
-# both the SSO and exchange endpoints when called repeatedly from one IP, but
-# tolerates one-off refreshes from Modal's rotating container IPs. When OAuth1
-# itself eventually expires, operator re-seeds via `auth.py` + `deploy.py`.
+# Volume holds the most recent OAuth1+OAuth2 token bundle. `endpoint()`
+# prefers `/tokens/garmin.b64` over the bootstrap env var so token rotation
+# doesn't require a redeploy. Sources of writes:
+#   - `write_tokens()` below: manual re-seed from a non-rate-limited IP
+#     (you run `auth.py` locally, then `modal run main.py::write_tokens`).
+#   - `endpoint()` self-heal: when a cold-start container manages to refresh
+#     OAuth2 via garth, it writes the fresh dump back so peer containers
+#     skip the refresh and don't pile onto Garmin's rate limit.
+# There's no scheduled cron because Garmin's anti-bot rate-limits both the
+# SSO and exchange endpoints when called repeatedly from one IP/IP-pool.
 tokens_volume = modal.Volume.from_name("garmin-tokens-vol", create_if_missing=True)
 TOKENS_VOLUME_PATH = "/tokens/garmin.b64"
+
+
+@app.function(volumes={"/tokens": tokens_volume})
+def write_tokens(tokens_base64: str):
+    """Push base64 tokens to the volume — manual re-seed path.
+
+    Run after `auth.py` on a non-rate-limited IP (your laptop) when Modal's
+    container pool is rate-limited and can't refresh on its own:
+
+        uv run modal run main.py::write_tokens \\
+            --tokens-base64 "$(cat ~/.garminconnect_base64)"
+    """
+    from pathlib import Path
+
+    tokens_base64 = tokens_base64.strip()
+    Path(TOKENS_VOLUME_PATH).write_text(tokens_base64)
+    tokens_volume.commit()
+    print(f"[write_tokens] wrote {len(tokens_base64)} chars to {TOKENS_VOLUME_PATH}")
 
 
 @app.function(volumes={"/tokens": tokens_volume})
@@ -158,11 +178,29 @@ def endpoint():
     except Exception as e:  # noqa: BLE001 — explicit broad catch, see comment above
         auth_status = f"failed: {type(e).__name__}: {e}"
 
+    # Self-healing: if login refreshed OAuth2 (volume held an expired token),
+    # write the fresh dump back so peer containers cold-starting later skip
+    # the refresh and don't add to Garmin's rate-limit pressure. Same applies
+    # when we loaded from the env-var bootstrap — seed the volume so later
+    # containers prefer it. Best-effort: any write failure is logged, not raised.
+    persisted = "no"
+    if auth_status == "ok":
+        try:
+            fresh = garmin_client.garth.dumps()
+            if fresh != tokens_base64:
+                with open(TOKENS_VOLUME_PATH, "w") as f:
+                    f.write(fresh)
+                tokens_volume.commit()
+                persisted = "yes"
+        except Exception as e:  # noqa: BLE001
+            persisted = f"failed:{type(e).__name__}"
+
     print(
         f"[startup] commit={os.environ.get('GIT_COMMIT', '?')} "
         f"dirty={os.environ.get('GIT_DIRTY', '?')} "
         f"tokens={tokens_source} "
         f"auth={auth_status} "
+        f"persisted={persisted} "
         f"display_name={garmin_client.display_name!r}"
     )
 
