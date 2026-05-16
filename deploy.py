@@ -5,9 +5,10 @@ dirty tree, the wrong branch, or a checkout that's behind origin/main. The
 last one is what burned us: a stale worktree quietly redeployed pre-fix code.
 
 Also blocks deploys when the local Garmin tokens are likely too old to survive
-container startup. Garmin's OAuth2 token has a ~24h TTL, and refreshing it via
-the exchange endpoint without recent SSO context gets 429'd by their anti-bot.
-Deploying with stale tokens means the new container can't authenticate.
+container startup. Garmin's OAuth2 token has a ~24h TTL; garth refreshes it
+lazily in-container via OAuth1, but if the bootstrap tokens are already stale
+at deploy time the first cold start can fail before lazy refresh has a chance
+to run. A fresh `auth.py` before deploy avoids that window.
 
 Usage:
     uv run python deploy.py            # enforce all checks
